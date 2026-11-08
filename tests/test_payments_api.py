@@ -8,7 +8,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import event, select
 
 from payments_processing.config import get_settings
-from payments_processing.db.models import Outbox, Payment
+from payments_processing.db.models import Outbox, Payment, PaymentStatus
 from payments_processing.db.session import get_session
 from payments_processing.main import app
 
@@ -123,3 +123,50 @@ async def test_outbox_failure_rolls_back_payment(api_client, session, payment_pa
     assert response.status_code == 500
     assert (await session.scalars(select(Payment))).all() == []
     assert (await session.scalars(select(Outbox))).all() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payment_status", [PaymentStatus.PENDING, PaymentStatus.SUCCEEDED])
+async def test_repeated_request_returns_existing_payment(
+    api_client, session, payment_payload, payment_status
+):
+    """Повтор возвращает существующий платёж без новых записей в БД."""
+    first = await api_client.post("/api/v1/payments", json=payment_payload)
+    assert first.status_code == 202
+    async with session.begin():
+        payment = await session.get(Payment, UUID(first.json()["payment_id"]))
+        payment.status = payment_status
+
+    payment_payload["amount"] = "100.500"
+    repeated = await api_client.post("/api/v1/payments", json=payment_payload)
+
+    assert repeated.status_code == 202
+    assert repeated.json() == {**first.json(), "status": payment_status.value}
+    assert len((await session.scalars(select(Payment))).all()) == 1
+    assert len((await session.scalars(select(Outbox))).all()) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("amount", "200.00"),
+        ("currency", "USD"),
+        ("description", "Другой заказ"),
+        ("metadata", {"order_id": "456"}),
+        ("webhook_url", "https://example.com/another-webhook"),
+    ],
+)
+async def test_repeated_key_with_different_data_returns_conflict(
+    api_client, session, payment_payload, field, value
+):
+    """Изменение данных при том же ключе даёт 409 без создания дублей."""
+    first = await api_client.post("/api/v1/payments", json=payment_payload)
+    assert first.status_code == 202
+    payment_payload[field] = value
+
+    response = await api_client.post("/api/v1/payments", json=payment_payload)
+
+    assert response.status_code == 409
+    assert len((await session.scalars(select(Payment))).all()) == 1
+    assert len((await session.scalars(select(Outbox))).all()) == 1

@@ -2,7 +2,7 @@
 
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments_processing.api.schemas import PaymentCreate, PaymentCreated
@@ -28,15 +28,21 @@ async def create_payment(
     Returns:
         Идентификатор, статус и дата создания принятого платежа.
     """
-    payment = await payments.create_payment(
-        session,
-        amount=data.amount,
-        currency=data.currency,
-        description=data.description,
-        metadata=data.metadata,
-        webhook_url=str(data.webhook_url),
-        idempotency_key=idempotency_key,
-    )
+    try:
+        payment = await payments.create_payment(
+            session,
+            amount=data.amount,
+            currency=data.currency,
+            description=data.description,
+            metadata=data.metadata,
+            webhook_url=str(data.webhook_url),
+            idempotency_key=idempotency_key,
+        )
+    except payments.IdempotencyConflict as error:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Idempotency-Key already used with different request data",
+        ) from error
     return PaymentCreated(
         payment_id=payment.id,
         status=payment.status,
