@@ -47,5 +47,9 @@ async def session(connection, alembic_config):
         command.upgrade(alembic_config, "head")
 
     await connection.run_sync(upgrade)
-    async with AsyncSession(bind=connection) as db_session:
+    async with AsyncSession(
+        bind=connection,
+        join_transaction_mode="create_savepoint",
+        expire_on_commit=False,
+    ) as db_session:
         yield db_session
