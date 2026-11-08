@@ -2,6 +2,7 @@
 
 from decimal import Decimal
 from typing import Any
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
@@ -74,3 +75,16 @@ async def create_payment(
             )
 
     return payment
+
+
+async def get_payment(session: AsyncSession, payment_id: UUID) -> Payment | None:
+    """Находит платёж по идентификатору.
+
+    Args:
+        session: Сессия БД для чтения платежа.
+        payment_id: Идентификатор платежа.
+
+    Returns:
+        Найденный платёж или None, если он отсутствует.
+    """
+    return await session.get(Payment, payment_id)

@@ -1,6 +1,6 @@
 """Интеграционные проверки создания платежей через API."""
 
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -144,6 +144,39 @@ async def test_repeated_request_returns_existing_payment(
     assert repeated.json() == {**first.json(), "status": payment_status.value}
     assert len((await session.scalars(select(Payment))).all()) == 1
     assert len((await session.scalars(select(Outbox))).all()) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_payment_returns_details(api_client, payment_payload):
+    """По ID доступны данные созданного платежа, его статус и даты."""
+    created = await api_client.post("/api/v1/payments", json=payment_payload)
+    assert created.status_code == 202
+    body = created.json()
+
+    response = await api_client.get("/api/v1/payments/" + body["payment_id"])
+
+    assert response.status_code == 200
+    assert response.json() == {
+        **payment_payload,
+        **body,
+        "idempotency_key": "order-123",
+        "processed_at": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_unknown_payment_returns_not_found(api_client):
+    """Несуществующий ID возвращает 404."""
+    response = await api_client.get(f"/api/v1/payments/{uuid4()}")
+    assert response.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_get_payment_requires_api_key(api_client):
+    """Получение платежа также требует API-ключ."""
+    api_client.headers.pop("X-API-Key")
+    response = await api_client.get(f"/api/v1/payments/{uuid4()}")
+    assert response.status_code == 401
 
 
 @pytest.mark.asyncio

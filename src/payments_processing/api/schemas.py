@@ -26,3 +26,15 @@ class PaymentCreated(BaseModel):
     payment_id: UUID
     status: PaymentStatus
     created_at: datetime
+
+
+class PaymentDetails(PaymentCreated):
+    """Подробная информация о платеже и результате его обработки."""
+
+    amount: Decimal
+    currency: Currency
+    description: str
+    metadata: dict[str, Any]
+    webhook_url: HttpUrl
+    idempotency_key: str
+    processed_at: datetime | None

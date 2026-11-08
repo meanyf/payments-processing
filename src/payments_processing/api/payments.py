@@ -1,11 +1,16 @@
 """Маршруты API платежей."""
 
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payments_processing.api.schemas import PaymentCreate, PaymentCreated
+from payments_processing.api.schemas import (
+    PaymentCreate,
+    PaymentCreated,
+    PaymentDetails,
+)
 from payments_processing.db.session import get_session
 from payments_processing.services import payments
 
@@ -47,4 +52,41 @@ async def create_payment(
         payment_id=payment.id,
         status=payment.status,
         created_at=payment.created_at,
+    )
+
+
+@router.get("/{payment_id}", response_model=PaymentDetails)
+async def get_payment(
+    payment_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PaymentDetails:
+    """Возвращает подробную информацию о платеже.
+
+    Args:
+        payment_id: Идентификатор платежа из пути запроса.
+        session: Сессия БД для чтения платежа.
+
+    Returns:
+        Данные платежа, его текущий статус и даты.
+
+    Raises:
+        HTTPException: Если платёж не найден.
+    """
+    payment = await payments.get_payment(session, payment_id)
+    if payment is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment not found",
+        )
+    return PaymentDetails(
+        payment_id=payment.id,
+        amount=payment.amount,
+        currency=payment.currency,
+        description=payment.description,
+        metadata=payment.payment_metadata,
+        status=payment.status,
+        idempotency_key=payment.idempotency_key,
+        webhook_url=payment.webhook_url,
+        created_at=payment.created_at,
+        processed_at=payment.processed_at,
     )
