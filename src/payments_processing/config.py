@@ -2,16 +2,17 @@
 
 from functools import lru_cache
 
-from pydantic import Field, PostgresDsn
+from pydantic import AmqpDsn, Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """Настройки подключения к PostgreSQL и доступа к API."""
+    """Настройки подключений к PostgreSQL, RabbitMQ и доступа к API."""
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 
     database_url: PostgresDsn
+    rabbitmq_url: AmqpDsn = AmqpDsn("amqp://payments:payments@localhost:5672/")
     api_key: str = Field(min_length=1, repr=False)
 
 
