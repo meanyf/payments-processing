@@ -1,6 +1,8 @@
 """Проверки доставки через настоящий RabbitMQ."""
 
+import asyncio
 import json
+from time import monotonic
 from uuid import uuid4
 
 import pytest
@@ -9,7 +11,32 @@ from aio_pika.exceptions import DeliveryError
 from faststream.rabbit import RabbitQueue
 from pamqp.commands import Basic
 
-from payments_processing.messaging.broker import connected_broker, payments_publisher
+from payments_processing.messaging import broker as broker_module
+from payments_processing.messaging.broker import (
+    connected_broker,
+    payments_publisher,
+    retry_queues,
+)
+from payments_processing.services import retries
+
+
+@pytest.mark.asyncio
+async def test_exhausted_message_reaches_dlq_through_named_exchange(monkeypatch):
+    """Окончательная ошибка доставляется в DLQ через отдельный обменник."""
+    target = RabbitQueue(f"test.dlq.{uuid4().hex}", exclusive=True)
+    monkeypatch.setattr(broker_module, "dead_letter_queue", target)
+    monkeypatch.setattr(retries, "dead_letter_queue", target)
+    async with connected_broker() as broker:
+        queue = await broker.declare_queue(target)
+        payload = {"payment_id": str(uuid4())}
+        await retries.publish_failure(payload, 3)
+
+        message = await queue.get(timeout=5)
+        assert message is not None
+        async with message.process():
+            assert message.exchange == "payments.dlx"
+            assert json.loads(message.body) == payload
+            assert message.headers["x-attempts"] == 3
 
 
 @pytest.mark.asyncio
@@ -40,3 +67,31 @@ async def test_publish_to_missing_queue_raises():
                 {"payment_id": str(uuid4())},
                 queue=f"missing.payments.{uuid4().hex}",
             )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_queue", retry_queues)
+async def test_retry_ttl_returns_message_to_work_queue(retry_queue):
+    """Очередь ожидания удерживает сообщение до TTL и возвращает через DLX."""
+    async with connected_broker() as broker:
+        destination = await broker.declare_queue(
+            RabbitQueue(f"test.return.{uuid4().hex}", exclusive=True)
+        )
+        arguments = {
+            **retry_queue.arguments,
+            "x-dead-letter-routing-key": destination.name,
+        }
+        waiting = await broker.declare_queue(
+            RabbitQueue(
+                f"test.retry.{uuid4().hex}", exclusive=True, arguments=arguments
+            )
+        )
+        delay = arguments["x-message-ttl"] / 1000
+        payload = {"payment_id": str(uuid4())}
+        async with destination.iterator() as messages:
+            started = monotonic()
+            await broker.publish(payload, queue=waiting.name, persist=True)
+            message = await asyncio.wait_for(anext(messages), timeout=delay + 5)
+            async with message.process():
+                assert monotonic() - started >= delay - 0.1
+                assert json.loads(message.body) == payload

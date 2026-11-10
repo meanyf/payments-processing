@@ -22,6 +22,7 @@ async def test_consumer_parses_payment_id(monkeypatch):
     monkeypatch.setattr(consumer, "session_factory", Mock(return_value=context))
     process = AsyncMock()
     monkeypatch.setattr(consumer, "process_payment", process)
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=1))
     http_context = AsyncMock()
     monkeypatch.setattr(consumer.httpx, "AsyncClient", Mock(return_value=http_context))
 
@@ -55,3 +56,80 @@ async def test_consumer_rejects_invalid_payment_id(monkeypatch, payload):
             await broker.publish(payload, queue="payments.new")
 
     logger.info.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_at", ["process", "webhook", None])
+@pytest.mark.parametrize("attempt", [1, 2, 3])
+async def test_consumer_acknowledges_only_after_work_or_transfer(
+    monkeypatch, failure_at, attempt
+):
+    """ACK следует за webhook либо подтверждённой передачей на повтор/DLQ."""
+    event = consumer.PaymentEvent(payment_id=uuid4())
+    message = AsyncMock(headers={"x-attempts": attempt - 1})
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer.httpx, "AsyncClient", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=attempt))
+    process = AsyncMock(
+        side_effect=RuntimeError("DB error") if failure_at == "process" else None
+    )
+    monkeypatch.setattr(consumer, "process_payment", process)
+
+    async def send(*args):
+        message.ack.assert_not_awaited()
+        if failure_at == "webhook":
+            raise TimeoutError("Webhook timeout")
+
+    webhook = AsyncMock(side_effect=send)
+    monkeypatch.setattr(consumer, "send_webhook", webhook)
+
+    async def transfer(*args):
+        message.ack.assert_not_awaited()
+
+    publish = AsyncMock(side_effect=transfer)
+    monkeypatch.setattr(consumer, "publish_failure", publish)
+
+    await consumer.handle_payment(event, message)
+
+    message.ack.assert_awaited_once()
+    message.nack.assert_not_awaited()
+    if failure_at:
+        publish.assert_awaited_once_with(event.model_dump(mode="json"), attempt)
+    else:
+        publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_exhausted_after_crash_goes_to_dlq_without_processing(monkeypatch):
+    """После трёх ранее начатых попыток обработка не запускается заново."""
+    event = consumer.PaymentEvent(payment_id=uuid4())
+    message = AsyncMock(headers={})
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=None))
+    process = AsyncMock()
+    monkeypatch.setattr(consumer, "process_payment", process)
+    publish = AsyncMock()
+    monkeypatch.setattr(consumer, "publish_failure", publish)
+
+    await consumer.handle_payment(event, message)
+
+    process.assert_not_awaited()
+    publish.assert_awaited_once_with(event.model_dump(mode="json"), 3)
+    message.ack.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transfer_error_requeues_original(monkeypatch):
+    """Сбой передачи в DLQ не удаляет исходное сообщение."""
+    event = consumer.PaymentEvent(payment_id=uuid4())
+    message = AsyncMock(headers={})
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        consumer, "publish_failure", AsyncMock(side_effect=TimeoutError)
+    )
+
+    await consumer.handle_payment(event, message)
+
+    message.ack.assert_not_awaited()
+    message.nack.assert_awaited_once_with(requeue=True)
