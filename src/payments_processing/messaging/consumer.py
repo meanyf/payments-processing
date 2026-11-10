@@ -3,12 +3,14 @@
 import logging
 from uuid import UUID
 
+import httpx
 from faststream import AckPolicy
 from pydantic import BaseModel
 
 from payments_processing.db.session import session_factory
 from payments_processing.messaging.broker import broker, payments_queue
 from payments_processing.services.payments import process_payment
+from payments_processing.services.webhook import send_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -28,4 +30,6 @@ async def handle_payment(event: PaymentEvent) -> None:
     """
     logger.info("Получено сообщение о платеже %s", event.payment_id)
     async with session_factory() as session:
-        await process_payment(session, event.payment_id)
+        payment = await process_payment(session, event.payment_id)
+    async with httpx.AsyncClient() as client:
+        await send_webhook(client, payment)

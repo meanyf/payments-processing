@@ -22,6 +22,16 @@ async def test_consumer_parses_payment_id(monkeypatch):
     monkeypatch.setattr(consumer, "session_factory", Mock(return_value=context))
     process = AsyncMock()
     monkeypatch.setattr(consumer, "process_payment", process)
+    http_context = AsyncMock()
+    monkeypatch.setattr(consumer.httpx, "AsyncClient", Mock(return_value=http_context))
+
+    async def send(client, payment):
+        context.__aexit__.assert_awaited_once()
+        assert client is http_context.__aenter__.return_value
+        assert payment is process.return_value
+
+    webhook = AsyncMock(side_effect=send)
+    monkeypatch.setattr(consumer, "send_webhook", webhook)
 
     async with TestRabbitBroker(consumer.broker) as broker:
         await broker.publish({"payment_id": str(payment_id)}, queue="payments.new")
@@ -29,6 +39,8 @@ async def test_consumer_parses_payment_id(monkeypatch):
     logger.info.assert_called_once_with("Получено сообщение о платеже %s", payment_id)
     process.assert_awaited_once_with(session, payment_id)
     context.__aexit__.assert_awaited_once()
+    webhook.assert_awaited_once()
+    http_context.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.asyncio
