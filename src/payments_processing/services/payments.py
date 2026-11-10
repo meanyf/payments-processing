@@ -1,5 +1,6 @@
 """Операции с платежами и событиями outbox."""
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -8,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payments_processing.db.models import Currency, Outbox, Payment
+from payments_processing.db.models import Currency, Outbox, Payment, PaymentStatus
+from payments_processing.services.gateway import simulate_payment
+
+
+class PaymentNotFound(Exception):
+    """Платёж из сообщения отсутствует в БД."""
 
 
 class IdempotencyConflict(Exception):
@@ -88,3 +94,35 @@ async def get_payment(session: AsyncSession, payment_id: UUID) -> Payment | None
         Найденный платёж или None, если он отсутствует.
     """
     return await session.get(Payment, payment_id)
+
+
+async def process_payment(session: AsyncSession, payment_id: UUID) -> Payment:
+    """Обрабатывает ожидающий платёж или возвращает сохранённый результат.
+
+    Блокировка строки удерживается до сохранения результата и завершения
+    транзакции. Параллельный обработчик дождётся её и прочитает итоговый статус.
+
+    Args:
+        session: Сессия БД с expire_on_commit=False без открытой транзакции.
+        payment_id: Идентификатор платежа.
+
+    Returns:
+        Платёж с сохранённым результатом обработки.
+
+    Raises:
+        PaymentNotFound: Если платёж отсутствует в БД.
+    """
+    async with session.begin():
+        payment = await session.scalar(
+            select(Payment)
+            .where(Payment.id == payment_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if payment is None:
+            raise PaymentNotFound(str(payment_id))
+        if payment.status == PaymentStatus.PENDING:
+            payment.status = await simulate_payment()
+            payment.processed_at = datetime.now(UTC)
+
+    return payment
