@@ -1,5 +1,6 @@
 """Проверки доставки через настоящий RabbitMQ."""
 
+import asyncio
 import json
 from uuid import uuid4
 
@@ -9,12 +10,41 @@ from aio_pika.exceptions import DeliveryError
 from faststream.rabbit import RabbitQueue
 from pamqp.commands import Basic
 
+from payments_processing.config import get_settings
 from payments_processing.messaging import broker as broker_module
 from payments_processing.messaging.broker import (
     connected_broker,
     payments_publisher,
 )
 from payments_processing.services import retries
+
+
+@pytest.mark.asyncio
+async def test_consumer_receives_no_more_than_configured_prefetch():
+    """При достижении лимита брокер ждёт ACK перед следующей доставкой."""
+    limit = get_settings().consumer_prefetch_count
+    async with connected_broker() as broker:
+        queue = await broker.declare_queue(
+            RabbitQueue(f"test.prefetch.{uuid4().hex}", exclusive=True)
+        )
+        received = asyncio.Queue()
+        tag = await queue.consume(received.put)
+        try:
+            for _ in range(limit + 1):
+                await broker.publish(b"payment", queue=queue.name)
+            pending = [
+                await asyncio.wait_for(received.get(), timeout=5)
+                for _ in range(limit)
+            ]
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(received.get(), timeout=0.2)
+            await pending.pop().ack()
+            next_message = await asyncio.wait_for(received.get(), timeout=5)
+            await next_message.ack()
+            for message in pending:
+                await message.ack()
+        finally:
+            await queue.cancel(tag)
 
 
 @pytest.mark.asyncio

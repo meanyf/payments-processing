@@ -5,6 +5,7 @@ x-app: &app
     DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments
     RABBITMQ_URL: amqp://payments:payments@rabbitmq:5672/
     API_KEY: ${API_KEY:?Set API_KEY in .env}
+    CONSUMER_PREFETCH_COUNT: ${CONSUMER_PREFETCH_COUNT:-4}
   stop_grace_period: 30s
 
 services:

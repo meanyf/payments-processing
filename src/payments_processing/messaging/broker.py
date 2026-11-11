@@ -9,7 +9,11 @@ from payments_processing.config import get_settings
 
 broker = RabbitBroker(
     str(get_settings().rabbitmq_url),
-    default_channel=Channel(publisher_confirms=True, on_return_raises=True),
+    default_channel=Channel(
+        prefetch_count=get_settings().consumer_prefetch_count,
+        publisher_confirms=True,
+        on_return_raises=True,
+    ),
 )
 payments_queue = RabbitQueue("payments.new", durable=True)
 dead_letter_queue = RabbitQueue("payments.dlq", durable=True)

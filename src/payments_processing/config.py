@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     rabbitmq_url: AmqpDsn = AmqpDsn("amqp://payments:payments@localhost:5672/")
     api_key: str = Field(min_length=1, repr=False)
+    consumer_prefetch_count: int = Field(default=4, ge=1, le=65535)
 
 
 @lru_cache
