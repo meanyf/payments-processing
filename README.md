@@ -112,11 +112,7 @@ ACK исходному сообщению отправляется после у
 docker compose -p payments-tests -f compose.test.yaml run --build --rm tests pytest
 ```
 
-Тесты запускаются в Docker с отдельными PostgreSQL и RabbitMQ без публикации портов; их данные хранятся в tmpfs. Подключения задаются через `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL` в `compose.test.yaml`. Без этих переменных pytest завершится с ошибкой.
-
-Один Dockerfile содержит этапы `test` с dev-зависимостями и `production` для приложения.
-
-Тесты проверяют API и идемпотентность, публикацию outbox, повторы и восстановление прерванных попыток, защиту от параллельной обработки и дублей webhook. Передача некорректных сообщений в DLQ проверяется на RabbitMQ тестового окружения.
+Тесты запускаются в Docker с отдельными PostgreSQL и RabbitMQ.
 
 После завершения удалите тестовое окружение:
 
