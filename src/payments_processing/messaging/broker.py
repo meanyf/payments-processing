@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from faststream.rabbit import Channel, RabbitBroker, RabbitExchange, RabbitQueue
 
-from payments_processing.config import get_settings
+from payments_processing.config import RETRY_DELAYS, get_settings
 
 broker = RabbitBroker(
     str(get_settings().rabbitmq_url),
@@ -22,7 +22,7 @@ retry_queues = tuple(
             "x-dead-letter-routing-key": payments_queue.name,
         },
     )
-    for index, delay in enumerate((2, 4), start=1)
+    for index, delay in enumerate(RETRY_DELAYS, start=1)
 )
 dead_letter_queue = RabbitQueue("payments.dlq", durable=True)
 dead_letter_exchange = RabbitExchange("payments.dlx", durable=True)

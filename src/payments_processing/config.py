@@ -5,6 +5,9 @@ from functools import lru_cache
 from pydantic import AmqpDsn, Field, PostgresDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+RETRY_DELAYS = (2, 4)  # Задержки перед повторами в секундах.
+MAX_ATTEMPTS = len(RETRY_DELAYS) + 1
+
 
 class Settings(BaseSettings):
     """Настройки подключений к PostgreSQL, RabbitMQ и доступа к API."""
