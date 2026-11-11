@@ -53,7 +53,7 @@ async def test_attempt_accounts_for_db_failures_in_message_header(session):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "attempt,queue",
-    [(1, "payments.retry.1"), (2, "payments.retry.2"), (3, "payments.dlq")],
+    [(3, "payments.dlq")],
 )
 async def test_retry_routes_by_attempt(monkeypatch, attempt, queue):
     """Первые две неудачи направляются на ожидание, третья — в DLQ."""
@@ -80,7 +80,7 @@ async def test_retry_requires_broker_confirmation(monkeypatch):
     """Отсутствие publisher confirm не считается передачей на повтор."""
     monkeypatch.setattr(retries.broker, "publish", AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="подтвердил"):
-        await retries.publish_failure({"payment_id": str(uuid4())}, 1)
+        await retries.publish_failure({"payment_id": str(uuid4())}, 3)
 
 
 @pytest.mark.asyncio
@@ -125,3 +125,21 @@ async def test_delivery_marker_is_persisted_before_duplicate(session):
     await session.refresh(payment)
     assert payment.webhook_delivered_at is not None
     assert payment.processing_attempts == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempt", [1, 2])
+async def test_failure_schedules_retry_without_contacting_broker(monkeypatch, attempt):
+    """Ошибка первых попыток сохраняется в БД без обращения к RabbitMQ."""
+    from unittest.mock import Mock
+
+    context = AsyncMock()
+    monkeypatch.setattr(retries, "session_factory", Mock(return_value=context))
+    schedule = AsyncMock()
+    publish = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(retries, "schedule_retry", schedule)
+    monkeypatch.setattr(retries.broker, "publish", publish)
+    payload = {"payment_id": str(uuid4())}
+    await retries.publish_failure(payload, attempt)
+    schedule.assert_awaited_once_with(context.__aenter__.return_value, payload, attempt)
+    publish.assert_not_awaited()

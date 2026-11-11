@@ -1,18 +1,19 @@
 """Учёт попыток и передача сообщений на повтор или в DLQ."""
 
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from pamqp.commands import Basic
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payments_processing.config import MAX_ATTEMPTS
-from payments_processing.db.models import Payment
+from payments_processing.config import MAX_ATTEMPTS, RETRY_DELAYS
+from payments_processing.db.models import Outbox, Payment
+from payments_processing.db.session import session_factory
 from payments_processing.messaging.broker import (
     broker,
     dead_letter_exchange,
     dead_letter_queue,
-    retry_queues,
 )
 from payments_processing.services.exceptions import PaymentNotFound
 
@@ -65,7 +66,7 @@ async def begin_attempt(
 
 
 async def publish_failure(payload: dict[str, str], attempt: int) -> None:
-    """Надёжно публикует сообщение в очередь ожидания или DLQ.
+    """Сохраняет повтор в outbox либо публикует сообщение в DLQ.
 
     Args:
         payload: Исходное событие платежа.
@@ -74,7 +75,11 @@ async def publish_failure(payload: dict[str, str], attempt: int) -> None:
     Raises:
         RuntimeError: Если брокер не подтвердил публикацию.
     """
-    queue = retry_queues[attempt - 1] if attempt < MAX_ATTEMPTS else dead_letter_queue
+    if attempt < MAX_ATTEMPTS:
+        async with session_factory() as session:
+            await schedule_retry(session, payload, attempt)
+        return
+    queue = dead_letter_queue
     confirmation = await broker.publish(
         payload,
         queue=queue,
@@ -86,3 +91,25 @@ async def publish_failure(payload: dict[str, str], attempt: int) -> None:
     )
     if not isinstance(confirmation, Basic.Ack):
         raise RuntimeError("RabbitMQ не подтвердил передачу сообщения")  # noqa: TRY004
+
+
+async def schedule_retry(
+    session: AsyncSession, payload: dict[str, str], attempt: int
+) -> None:
+    """Сохраняет отложенный повтор до ACK исходного сообщения.
+
+    Args:
+        session: Сессия без активной транзакции.
+        payload: Исходное событие платежа.
+        attempt: Число завершённых попыток.
+    """
+    async with session.begin():
+        session.add(
+            Outbox(
+                event_type="payments.new",
+                payload=payload,
+                headers={"x-attempts": attempt},
+                available_at=datetime.now(UTC)
+                + timedelta(seconds=RETRY_DELAYS[attempt - 1]),
+            )
+        )
