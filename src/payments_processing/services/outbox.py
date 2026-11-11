@@ -3,7 +3,7 @@
 from datetime import UTC, datetime
 
 from pamqp.commands import Basic
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments_processing.db.models import Outbox
@@ -27,7 +27,7 @@ async def get_pending_events(
     """
     events = await session.scalars(
         select(Outbox)
-        .where(Outbox.published_at.is_(None))
+        .where(Outbox.published_at.is_(None), Outbox.available_at <= func.now())
         .order_by(Outbox.created_at, Outbox.id)
         .limit(batch_size)
         .with_for_update(skip_locked=True)
@@ -56,7 +56,8 @@ async def publish_pending_events(
     async with session.begin():
         events = await get_pending_events(session, batch_size=batch_size)
         for event in events:
-            confirmation = await payments_publisher.publish(event.payload)
+            kwargs = {"headers": event.headers} if event.headers else {}
+            confirmation = await payments_publisher.publish(event.payload, **kwargs)
             if not isinstance(confirmation, Basic.Ack):
                 raise RuntimeError("RabbitMQ did not confirm publication")  # noqa: TRY004
             event.published_at = datetime.now(UTC)

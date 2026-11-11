@@ -1,0 +1,43 @@
+services:
+  postgres-test:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: payments_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test -d payments_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  rabbitmq-test:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: test
+      RABBITMQ_DEFAULT_PASS: test
+      RABBITMQ_DEFAULT_VHOST: payments_test
+    tmpfs:
+      - /var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      PYTEST_ADDOPTS: "-o cache_dir=/tmp/pytest-cache"
+      TEST_DATABASE_URL: postgresql+asyncpg://test:test@postgres-test:5432/payments_test
+      TEST_RABBITMQ_URL: amqp://test:test@rabbitmq-test:5672/payments_test
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+      rabbitmq-test:
+        condition: service_healthy

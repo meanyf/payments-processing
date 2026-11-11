@@ -68,3 +68,49 @@ async def test_failed_batch_is_rolled_back_and_retried(
     assert await publish_pending_events(session) == 2
     assert all(event.published_at is not None for event in events)
     assert publish.await_count == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempt,delay", [(1, 2), (2, 4)])
+async def test_scheduled_retry_survives_broker_failure(
+    session, monkeypatch, attempt, delay
+):
+    """Повтор ждёт срока и сохраняется при сбое RabbitMQ вместе со счётчиком."""
+    from datetime import UTC, datetime, timedelta
+
+    from payments_processing.db.models import AttemptState, Currency, Payment
+    from payments_processing.services.retries import schedule_retry
+
+    payment = Payment(
+        amount=1,
+        currency=Currency.RUB,
+        description="test",
+        idempotency_key=str(uuid4()),
+        webhook_url="https://example.com",
+        processing_attempts=attempt,
+        attempt_state=AttemptState.PROCESSING,
+    )
+    async with session.begin():
+        session.add(payment)
+    payload = {"payment_id": str(payment.id)}
+    before = datetime.now(UTC)
+    await schedule_retry(session, payload, attempt)
+    event = await session.scalar(select(Outbox))
+    assert event.available_at >= before + timedelta(seconds=delay)
+    await session.commit()
+    publish = AsyncMock(side_effect=TimeoutError)
+    monkeypatch.setattr(outbox.payments_publisher, "publish", publish)
+    assert await publish_pending_events(session) == 0
+    publish.assert_not_awaited()
+    event.available_at = before - timedelta(seconds=1)
+    await session.commit()
+    with pytest.raises(TimeoutError):
+        await publish_pending_events(session)
+    event = await session.scalar(select(Outbox))
+    assert event.published_at is None
+    assert event.headers == {"x-attempts": attempt}
+    await session.commit()
+    publish.side_effect = None
+    publish.return_value = Basic.Ack()
+    assert await publish_pending_events(session) == 1
+    publish.assert_awaited_with(payload, headers={"x-attempts": attempt})

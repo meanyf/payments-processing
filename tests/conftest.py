@@ -6,9 +6,13 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from alembic.config import Config
+from environment import configure_test_environment
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from alembic import command
+
+configure_test_environment()
+
 from payments_processing.config import Settings
 
 

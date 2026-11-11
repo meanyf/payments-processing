@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
@@ -19,6 +19,16 @@ COPY alembic.ini ./
 COPY alembic ./alembic
 
 RUN useradd --create-home app
+
+FROM base AS test
+
+RUN uv sync --locked --extra dev --no-editable
+COPY tests ./tests
+
+USER app
+
+FROM base AS production
+
 USER app
 
 EXPOSE 8000

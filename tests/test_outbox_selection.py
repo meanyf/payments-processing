@@ -59,7 +59,9 @@ async def outbox_sessions(alembic_config):
     finally:
         await engine.dispose()
         async with admin_engine.begin() as connection:
-            await connection.exec_driver_sql("DROP SCHEMA IF EXISTS " + schema + " CASCADE")
+            await connection.exec_driver_sql(
+                "DROP SCHEMA IF EXISTS " + schema + " CASCADE"
+            )
         await admin_engine.dispose()
 
 
@@ -90,3 +92,16 @@ async def test_skips_locked_events_and_releases_them_after_rollback(outbox_sessi
             available = await get_pending_events(second, batch_size=3)
             assert len(available) == 3
             assert first_ids.issubset(event.id for event in available)
+
+
+@pytest.mark.asyncio
+async def test_future_retry_is_not_selected(session):
+    """Publisher не отправляет повтор до наступления срока."""
+    event = Outbox(
+        event_type="payments.new",
+        payload={},
+        available_at=datetime.now(UTC) + timedelta(seconds=30),
+    )
+    session.add(event)
+    await session.flush()
+    assert await get_pending_events(session) == []

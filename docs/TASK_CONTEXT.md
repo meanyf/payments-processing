@@ -90,3 +90,22 @@
 ### Формат payload webhook
 
 - JSON с полями `payment_id` и `status` (`succeeded` или `failed`).
+
+### Планирование повторов
+
+- После первой и второй ошибки повтор сохраняется в outbox с `available_at` через 2 и 4 секунды. ACK следует после коммита. Publisher передаёт `x-attempts` из сохранённых заголовков.
+- Ошибка публикации RabbitMQ оставляет событие в outbox и не расходует попытки consumer.
+- После третьей ошибки сохраняется прямая передача через `payments.dlx` в `payments.dlq`.
+
+### Тестовое окружение
+
+- Полный набор тестов запускается через `docker compose -p payments-tests -f compose.test.yaml run --build --rm tests pytest`.
+- Тестовые PostgreSQL и RabbitMQ доступны только внутри сети проекта, данные размещаются в tmpfs. После завершения ресурсы удаляются командой `docker compose -p payments-tests -f compose.test.yaml down --volumes --remove-orphans`.
+- До импорта приложения `tests/conftest.py` заменяет подключения на `TEST_DATABASE_URL` и `TEST_RABBITMQ_URL`. Без этих переменных pytest останавливается; `.env` приложения не служит источником тестовых подключений.
+
+### Восстановление попыток
+
+- Перед обработкой сохраняются счётчик и `attempt_state=processing`.
+- Состояние `waiting_retry`, `next_attempt_at` и запись outbox сохраняются атомарно.
+- Под advisory lock прерванная попытка переводится на отложенный повтор без новой бизнес-обработки; третья — в DLQ.
+- Старые сообщения определяются по `x-attempts`; ранний повтор не начинает обработку.

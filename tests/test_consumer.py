@@ -1,14 +1,26 @@
 """Проверки получения и разбора событий платежей."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
 from faststream.rabbit import TestRabbitBroker
-from pydantic import ValidationError
 
 from payments_processing.messaging import consumer
 from payments_processing.messaging.schemas import PaymentEvent
+
+
+@pytest.fixture(autouse=True)
+def mock_delivery_marker(monkeypatch):
+    """Изолирует запись доставки в модульных тестах обработчика."""
+    monkeypatch.setattr(consumer, "mark_webhook_delivered", AsyncMock())
+
+    @asynccontextmanager
+    async def lock(payment_id):
+        yield True
+
+    monkeypatch.setattr(consumer, "lock_payment", lock)
 
 
 @pytest.mark.asyncio
@@ -28,7 +40,7 @@ async def test_consumer_parses_payment_id(monkeypatch):
     monkeypatch.setattr(consumer.httpx, "AsyncClient", Mock(return_value=http_context))
 
     async def send(client, payment):
-        context.__aexit__.assert_awaited_once()
+        assert context.__aexit__.await_count == 2
         assert client is http_context.__aenter__.return_value
         assert payment is process.return_value
 
@@ -40,7 +52,7 @@ async def test_consumer_parses_payment_id(monkeypatch):
 
     logger.info.assert_called_once_with("Получено сообщение о платеже %s", payment_id)
     process.assert_awaited_once_with(session, payment_id)
-    context.__aexit__.assert_awaited_once()
+    assert context.__aexit__.await_count == 3
     webhook.assert_awaited_once()
     http_context.__aexit__.assert_awaited_once()
 
@@ -52,9 +64,9 @@ async def test_consumer_rejects_invalid_payment_id(monkeypatch, payload):
     logger = Mock()
     monkeypatch.setattr(consumer, "logger", logger)
 
+    monkeypatch.setattr(consumer, "publish_invalid", AsyncMock())
     async with TestRabbitBroker(consumer.broker) as broker:
-        with pytest.raises(ValidationError):
-            await broker.publish(payload, queue="payments.new")
+        await broker.publish(payload, queue="payments.new")
 
     logger.info.assert_not_called()
 
@@ -134,3 +146,81 @@ async def test_transfer_error_requeues_original(monkeypatch):
 
     message.ack.assert_not_awaited()
     message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_delivered_duplicate_is_acknowledged_without_work(monkeypatch):
+    """Завершённый дубль подтверждается без обработки, webhook и DLQ."""
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=0))
+    process = AsyncMock()
+    webhook = AsyncMock()
+    transfer = AsyncMock()
+    monkeypatch.setattr(consumer, "process_payment", process)
+    monkeypatch.setattr(consumer, "send_webhook", webhook)
+    monkeypatch.setattr(consumer, "publish_failure", transfer)
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    message.ack.assert_awaited_once()
+    process.assert_not_awaited()
+    webhook.assert_not_awaited()
+    transfer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_busy_duplicate_does_not_consume_attempt(monkeypatch):
+    """Занятый платёж возвращается в очередь без расходования попытки."""
+
+    @asynccontextmanager
+    async def busy(payment_id):
+        yield False
+
+    monkeypatch.setattr(consumer, "lock_payment", busy)
+    begin = AsyncMock()
+    monkeypatch.setattr(consumer, "begin_attempt", begin)
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    begin.assert_not_awaited()
+    message.ack.assert_not_awaited()
+    message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempt", [1, 2, 3])
+async def test_interrupted_delivery_only_arranges_retry(monkeypatch, attempt):
+    """Восстановление не выполняет webhook и передаёт сохранённый номер попытки."""
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(
+        consumer,
+        "begin_attempt",
+        AsyncMock(side_effect=consumer.InterruptedAttempt(attempt)),
+    )
+    process = AsyncMock()
+    webhook = AsyncMock()
+    transfer = AsyncMock()
+    monkeypatch.setattr(consumer, "process_payment", process)
+    monkeypatch.setattr(consumer, "send_webhook", webhook)
+    monkeypatch.setattr(consumer, "publish_failure", transfer)
+    event = PaymentEvent(payment_id=uuid4())
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(event, message)
+    process.assert_not_awaited()
+    webhook.assert_not_awaited()
+    transfer.assert_awaited_once_with(event.model_dump(mode="json"), attempt)
+    message.ack.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_begin_database_failure_does_not_schedule_attempt(monkeypatch):
+    """Сбой фиксации начала не создаёт повтор с выдуманным номером попытки."""
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(
+        consumer, "begin_attempt", AsyncMock(side_effect=ConnectionError)
+    )
+    transfer = AsyncMock()
+    monkeypatch.setattr(consumer, "publish_failure", transfer)
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    transfer.assert_not_awaited()
+    message.nack.assert_awaited_once_with(requeue=True)
+    message.ack.assert_not_awaited()

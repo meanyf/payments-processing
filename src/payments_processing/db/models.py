@@ -29,6 +29,15 @@ class PaymentStatus(StrEnum):
     FAILED = "failed"
 
 
+class AttemptState(StrEnum):
+    """Состояния попытки обработки платежа и доставки webhook."""
+
+    READY = "ready"
+    PROCESSING = "processing"
+    WAITING_RETRY = "waiting_retry"
+    DELIVERED = "delivered"
+
+
 class Payment(Base):
     """Платёж и результат его обработки."""
 
@@ -56,6 +65,21 @@ class Payment(Base):
         DateTime(timezone=True), server_default=func.now()
     )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
+    attempt_state: Mapped[AttemptState] = mapped_column(
+        Enum(
+            AttemptState,
+            name="attempt_state",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=AttemptState.READY,
+        server_default=AttemptState.READY.value,
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_attempts: Mapped[int] = mapped_column(default=0, server_default="0")
 
 
@@ -69,5 +93,11 @@ class Outbox(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    headers: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, default=dict, server_default="{}"
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
