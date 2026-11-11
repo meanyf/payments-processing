@@ -36,6 +36,7 @@ class AttemptState(StrEnum):
     PROCESSING = "processing"
     WAITING_RETRY = "waiting_retry"
     DELIVERED = "delivered"
+    EXHAUSTED = "exhausted"
 
 
 class Payment(Base):

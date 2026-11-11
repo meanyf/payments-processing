@@ -7,7 +7,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments_processing.db.models import Outbox
-from payments_processing.messaging.broker import payments_publisher
+from payments_processing.messaging.broker import (
+    broker,
+    dead_letter_exchange,
+    dead_letter_queue,
+    payments_publisher,
+)
 
 
 async def get_pending_events(
@@ -57,7 +62,20 @@ async def publish_pending_events(
         events = await get_pending_events(session, batch_size=batch_size)
         for event in events:
             kwargs = {"headers": event.headers} if event.headers else {}
-            confirmation = await payments_publisher.publish(event.payload, **kwargs)
+            if event.event_type == "payments.dlq":
+                confirmation = await broker.publish(
+                    event.payload,
+                    queue=dead_letter_queue,
+                    exchange=dead_letter_exchange,
+                    persist=True,
+                    mandatory=True,
+                    timeout=10,
+                    **kwargs,
+                )
+            elif event.event_type == "payments.new":
+                confirmation = await payments_publisher.publish(event.payload, **kwargs)
+            else:
+                raise ValueError(f"Неизвестный тип события: {event.event_type}")
             if not isinstance(confirmation, Basic.Ack):
                 raise RuntimeError("RabbitMQ did not confirm publication")  # noqa: TRY004
             event.published_at = datetime.now(UTC)

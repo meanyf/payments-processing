@@ -5,10 +5,18 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from pamqp.commands import Basic
+from sqlalchemy import select
 
-from payments_processing.db.models import Currency, Payment
+from payments_processing.db.models import (
+    AttemptState,
+    Currency,
+    Outbox,
+    Payment,
+    PaymentStatus,
+)
+from payments_processing.messaging.broker import broker
 from payments_processing.services import retries
+from payments_processing.services.exceptions import AttemptMismatch
 
 
 @pytest.mark.asyncio
@@ -46,8 +54,11 @@ async def test_attempt_survives_processing_rollback_and_stops_at_three(session):
 
 
 @pytest.mark.asyncio
-async def test_attempt_accounts_for_db_failures_in_message_header(session):
-    """После восстановления БД учитываются попытки из заголовка сообщения."""
+@pytest.mark.parametrize("previous_attempts", [1, 2, 3])
+async def test_ready_payment_rejects_nonzero_attempts_without_changing_state(
+    session, previous_attempts
+):
+    """Заголовок не расходует попытки нового платежа и не мешает верному событию."""
     payment = Payment(
         amount=Decimal("100.00"),
         currency=Currency.RUB,
@@ -57,43 +68,23 @@ async def test_attempt_accounts_for_db_failures_in_message_header(session):
     )
     async with session.begin():
         session.add(payment)
+    payment_id = payment.id
 
-    assert await retries.begin_attempt(session, payment.id, previous_attempts=2) == 3
-    with pytest.raises(retries.InterruptedAttempt):
-        await retries.begin_attempt(session, payment.id)
+    with pytest.raises(AttemptMismatch):
+        await retries.begin_attempt(session, payment_id, previous_attempts)
 
+    assert not session.in_transaction()
+    async with session.begin():
+        payment = await session.get(Payment, payment_id, populate_existing=True)
+        assert payment.attempt_state == AttemptState.READY
+        assert payment.processing_attempts == 0
+        assert payment.status == PaymentStatus.PENDING
+        assert payment.processed_at is None
+        assert payment.next_attempt_at is None
+        assert payment.webhook_delivered_at is None
+        assert list(await session.scalars(select(Outbox))) == []
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "attempt,queue",
-    [(3, "payments.dlq")],
-)
-async def test_retry_routes_by_attempt(monkeypatch, attempt, queue):
-    """Первые две неудачи направляются на ожидание, третья — в DLQ."""
-    publish = AsyncMock(return_value=Basic.Ack())
-    monkeypatch.setattr(retries.broker, "publish", publish)
-    payload = {"payment_id": str(uuid4())}
-
-    await retries.publish_failure(payload, attempt)
-
-    assert publish.await_args.kwargs["queue"].name == queue
-    exchange = publish.await_args.kwargs.get("exchange")
-    if attempt == 3:
-        assert exchange is not None
-        assert exchange.name == "payments.dlx"
-    else:
-        assert exchange is None
-    assert publish.await_args.kwargs["headers"] == {"x-attempts": attempt}
-    assert publish.await_args.kwargs["persist"] is True
-    assert publish.await_args.kwargs["mandatory"] is True
-
-
-@pytest.mark.asyncio
-async def test_retry_requires_broker_confirmation(monkeypatch):
-    """Отсутствие publisher confirm не считается передачей на повтор."""
-    monkeypatch.setattr(retries.broker, "publish", AsyncMock(return_value=None))
-    with pytest.raises(RuntimeError, match="подтвердил"):
-        await retries.publish_failure({"payment_id": str(uuid4())}, 3)
+    assert await retries.begin_attempt(session, payment_id) == 1
 
 
 @pytest.mark.asyncio
@@ -141,17 +132,19 @@ async def test_delivery_marker_is_persisted_before_duplicate(session):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("attempt", [1, 2])
+@pytest.mark.parametrize("attempt", [1, 2, 3])
 async def test_failure_schedules_retry_without_contacting_broker(monkeypatch, attempt):
-    """Ошибка первых попыток сохраняется в БД без обращения к RabbitMQ."""
+    """Повтор и окончательная ошибка сохраняются в БД без обращения к RabbitMQ."""
     from unittest.mock import Mock
 
     context = AsyncMock()
     monkeypatch.setattr(retries, "session_factory", Mock(return_value=context))
     schedule = AsyncMock()
     publish = AsyncMock(side_effect=TimeoutError)
-    monkeypatch.setattr(retries, "schedule_retry", schedule)
-    monkeypatch.setattr(retries.broker, "publish", publish)
+    monkeypatch.setattr(
+        retries, "schedule_retry" if attempt < 3 else "exhaust_attempts", schedule
+    )
+    monkeypatch.setattr(broker, "publish", publish)
     payload = {"payment_id": str(uuid4())}
     await retries.publish_failure(payload, attempt)
     schedule.assert_awaited_once_with(context.__aenter__.return_value, payload, attempt)
