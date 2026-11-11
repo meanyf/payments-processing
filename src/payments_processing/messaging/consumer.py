@@ -1,30 +1,23 @@
 """Получение событий о новых платежах."""
 
 import logging
-from uuid import UUID
 
 import httpx
 from faststream import AckPolicy
 from faststream.rabbit.annotations import RabbitMessage
-from pydantic import BaseModel
 
+from payments_processing.config import MAX_ATTEMPTS
 from payments_processing.db.session import session_factory
 from payments_processing.messaging.broker import broker, payments_queue
+from payments_processing.messaging.schemas import PaymentEvent
 from payments_processing.services.payments import process_payment
 from payments_processing.services.retries import (
-    MAX_ATTEMPTS,
     begin_attempt,
     publish_failure,
 )
 from payments_processing.services.webhook import send_webhook
 
 logger = logging.getLogger(__name__)
-
-
-class PaymentEvent(BaseModel):
-    """Событие с идентификатором платежа для обработки."""
-
-    payment_id: UUID
 
 
 @broker.subscriber(payments_queue, ack_policy=AckPolicy.MANUAL)

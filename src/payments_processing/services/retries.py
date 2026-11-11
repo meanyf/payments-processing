@@ -6,6 +6,7 @@ from pamqp.commands import Basic
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from payments_processing.config import MAX_ATTEMPTS
 from payments_processing.db.models import Payment
 from payments_processing.messaging.broker import (
     broker,
@@ -13,9 +14,7 @@ from payments_processing.messaging.broker import (
     dead_letter_queue,
     retry_queues,
 )
-from payments_processing.services.payments import PaymentNotFound
-
-MAX_ATTEMPTS = 3
+from payments_processing.services.exceptions import PaymentNotFound
 
 
 async def begin_attempt(

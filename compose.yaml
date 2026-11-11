@@ -1,4 +1,48 @@
+x-app: &app
+  image: payments-processing:local
+  build: .
+  environment:
+    DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/payments
+    RABBITMQ_URL: amqp://payments:payments@rabbitmq:5672/
+    API_KEY: ${API_KEY:?Set API_KEY in .env}
+  stop_grace_period: 30s
+
 services:
+  migrate:
+    <<: *app
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *app
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  publisher:
+    <<: *app
+    command: ["python", "-m", "payments_processing.publisher"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  consumer:
+    <<: *app
+    command: ["python", "-m", "payments_processing.consumer"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
   postgres:
     image: postgres:17
     environment:

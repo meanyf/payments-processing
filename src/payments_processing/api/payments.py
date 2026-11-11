@@ -13,6 +13,7 @@ from payments_processing.api.schemas import (
 )
 from payments_processing.db.session import get_session
 from payments_processing.services import payments
+from payments_processing.services.exceptions import IdempotencyConflict
 
 router = APIRouter(prefix="/api/v1/payments", tags=["payments"])
 
@@ -43,7 +44,7 @@ async def create_payment(
             webhook_url=str(data.webhook_url),
             idempotency_key=idempotency_key,
         )
-    except payments.IdempotencyConflict as error:
+    except IdempotencyConflict as error:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Idempotency-Key already used with different request data",

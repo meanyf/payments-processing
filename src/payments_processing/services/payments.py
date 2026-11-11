@@ -10,15 +10,8 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments_processing.db.models import Currency, Outbox, Payment, PaymentStatus
+from payments_processing.services.exceptions import IdempotencyConflict, PaymentNotFound
 from payments_processing.services.gateway import simulate_payment
-
-
-class PaymentNotFound(Exception):
-    """Платёж из сообщения отсутствует в БД."""
-
-
-class IdempotencyConflict(Exception):
-    """Ключ идемпотентности уже использован с другими данными платежа."""
 
 
 async def create_payment(

@@ -8,6 +8,7 @@ from faststream.rabbit import TestRabbitBroker
 from pydantic import ValidationError
 
 from payments_processing.messaging import consumer
+from payments_processing.messaging.schemas import PaymentEvent
 
 
 @pytest.mark.asyncio
@@ -65,7 +66,7 @@ async def test_consumer_acknowledges_only_after_work_or_transfer(
     monkeypatch, failure_at, attempt
 ):
     """ACK следует за webhook либо подтверждённой передачей на повтор/DLQ."""
-    event = consumer.PaymentEvent(payment_id=uuid4())
+    event = PaymentEvent(payment_id=uuid4())
     message = AsyncMock(headers={"x-attempts": attempt - 1})
     monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
     monkeypatch.setattr(consumer.httpx, "AsyncClient", Mock(return_value=AsyncMock()))
@@ -102,7 +103,7 @@ async def test_consumer_acknowledges_only_after_work_or_transfer(
 @pytest.mark.asyncio
 async def test_exhausted_after_crash_goes_to_dlq_without_processing(monkeypatch):
     """После трёх ранее начатых попыток обработка не запускается заново."""
-    event = consumer.PaymentEvent(payment_id=uuid4())
+    event = PaymentEvent(payment_id=uuid4())
     message = AsyncMock(headers={})
     monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
     monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=None))
@@ -121,7 +122,7 @@ async def test_exhausted_after_crash_goes_to_dlq_without_processing(monkeypatch)
 @pytest.mark.asyncio
 async def test_transfer_error_requeues_original(monkeypatch):
     """Сбой передачи в DLQ не удаляет исходное сообщение."""
-    event = consumer.PaymentEvent(payment_id=uuid4())
+    event = PaymentEvent(payment_id=uuid4())
     message = AsyncMock(headers={})
     monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
     monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=None))
