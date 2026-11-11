@@ -13,6 +13,7 @@ from payments_processing.db.session import session_factory
 from payments_processing.messaging import broker as broker_module
 from payments_processing.messaging.broker import broker, payments_queue
 from payments_processing.messaging.schemas import PaymentEvent
+from payments_processing.services.payment_lock import lock_payment
 from payments_processing.services.payments import process_payment
 from payments_processing.services.retries import (
     begin_attempt,
@@ -24,6 +25,19 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
+    """Допускает только одну активную обработку платежа между consumer-процессами."""
+    try:
+        async with lock_payment(event.payment_id) as acquired:
+            if not acquired:
+                await message.nack(requeue=True)
+                return
+            await _handle_payment(event, message)
+    except Exception:
+        logger.exception("Ошибка блокировки платежа %s", event.payment_id)
+        await message.nack(requeue=True)
+
+
+async def _handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
     """Обрабатывает платёж и webhook с общим лимитом попыток.
 
     Args:

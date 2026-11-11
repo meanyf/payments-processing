@@ -1,4 +1,7 @@
 .git
+.agents
+.aws
+.codex
 .venv
 .env
 .env.*

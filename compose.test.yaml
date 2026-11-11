@@ -31,7 +31,7 @@ services:
   tests:
     build:
       context: .
-      dockerfile: Dockerfile.test
+      target: test
     environment:
       PYTEST_ADDOPTS: "-o cache_dir=/tmp/pytest-cache"
       TEST_DATABASE_URL: postgresql+asyncpg://test:test@postgres-test:5432/payments_test

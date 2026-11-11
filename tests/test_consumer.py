@@ -1,5 +1,6 @@
 """Проверки получения и разбора событий платежей."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
@@ -14,6 +15,12 @@ from payments_processing.messaging.schemas import PaymentEvent
 def mock_delivery_marker(monkeypatch):
     """Изолирует запись доставки в модульных тестах обработчика."""
     monkeypatch.setattr(consumer, "mark_webhook_delivered", AsyncMock())
+
+    @asynccontextmanager
+    async def lock(payment_id):
+        yield True
+
+    monkeypatch.setattr(consumer, "lock_payment", lock)
 
 
 @pytest.mark.asyncio
@@ -158,3 +165,20 @@ async def test_delivered_duplicate_is_acknowledged_without_work(monkeypatch):
     process.assert_not_awaited()
     webhook.assert_not_awaited()
     transfer.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_busy_duplicate_does_not_consume_attempt(monkeypatch):
+    """Занятый платёж возвращается в очередь без расходования попытки."""
+    @asynccontextmanager
+    async def busy(payment_id):
+        yield False
+
+    monkeypatch.setattr(consumer, "lock_payment", busy)
+    begin = AsyncMock()
+    monkeypatch.setattr(consumer, "begin_attempt", begin)
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    begin.assert_not_awaited()
+    message.ack.assert_not_awaited()
+    message.nack.assert_awaited_once_with(requeue=True)
