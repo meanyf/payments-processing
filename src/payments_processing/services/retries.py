@@ -56,6 +56,10 @@ async def begin_attempt(
             return 0
         if payment.attempt_state == AttemptState.EXHAUSTED:
             return 0
+        if payment.attempt_state == AttemptState.READY and previous_attempts != 0:
+            raise AttemptMismatch(
+                "Новый платёж не может иметь завершённые попытки в сообщении"
+            )
         if payment.attempt_state == AttemptState.PROCESSING:
             raise InterruptedAttempt(payment.processing_attempts)
         if payment.attempt_state == AttemptState.WAITING_RETRY:
@@ -67,11 +71,6 @@ async def begin_attempt(
                 )
             if payment.next_attempt_at > datetime.now(UTC):
                 raise RetryNotDue
-        if payment.processing_attempts >= MAX_ATTEMPTS:
-            return None
-        payment.processing_attempts = max(
-            payment.processing_attempts, previous_attempts
-        )
         if payment.processing_attempts >= MAX_ATTEMPTS:
             return None
         payment.processing_attempts += 1
