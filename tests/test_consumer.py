@@ -9,6 +9,7 @@ from faststream.rabbit import TestRabbitBroker
 
 from payments_processing.messaging import consumer
 from payments_processing.messaging.schemas import PaymentEvent
+from payments_processing.services.exceptions import AttemptMismatch, PaymentNotFound
 
 
 @pytest.fixture(autouse=True)
@@ -224,3 +225,52 @@ async def test_begin_database_failure_does_not_schedule_attempt(monkeypatch):
     transfer.assert_not_awaited()
     message.nack.assert_awaited_once_with(requeue=True)
     message.ack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transfer_fails", [False, True])
+@pytest.mark.parametrize("error_type", [PaymentNotFound, AttemptMismatch])
+async def test_permanent_failure_transferred_before_ack(
+    monkeypatch, transfer_fails, error_type
+):
+    """Постоянная ошибка уходит в DLQ, сбой передачи сохраняет оригинал."""
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(
+        consumer, "begin_attempt", AsyncMock(side_effect=error_type("invalid event"))
+    )
+    message = AsyncMock(body=b'{"payment_id":"missing"}', headers={})
+
+    async def transfer(*args):
+        message.ack.assert_not_awaited()
+        if transfer_fails:
+            raise TimeoutError
+
+    publish = AsyncMock(side_effect=transfer)
+    monkeypatch.setattr(consumer, "publish_invalid", publish)
+    process = AsyncMock()
+    monkeypatch.setattr(consumer, "process_payment", process)
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    publish.assert_awaited_once_with(message.body, message.headers, "invalid event")
+    process.assert_not_awaited()
+    if transfer_fails:
+        message.ack.assert_not_awaited()
+        message.nack.assert_awaited_once_with(requeue=True)
+    else:
+        message.ack.assert_awaited_once()
+        message.nack.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_early_retry_is_not_sent_to_dlq(monkeypatch):
+    """Ранний повтор остаётся доступным для обработки после наступления срока."""
+    from payments_processing.services.retries import RetryNotDue
+
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(side_effect=RetryNotDue))
+    publish = AsyncMock()
+    monkeypatch.setattr(consumer, "publish_invalid", publish)
+    message = AsyncMock(headers={"x-attempts": 1})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    publish.assert_not_awaited()
+    message.ack.assert_not_awaited()
+    message.nack.assert_awaited_once_with(requeue=True)

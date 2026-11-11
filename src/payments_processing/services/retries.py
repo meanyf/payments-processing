@@ -15,7 +15,7 @@ from payments_processing.messaging.broker import (
     dead_letter_exchange,
     dead_letter_queue,
 )
-from payments_processing.services.exceptions import PaymentNotFound
+from payments_processing.services.exceptions import AttemptMismatch, PaymentNotFound
 
 
 class InterruptedAttempt(Exception):
@@ -47,6 +47,7 @@ async def begin_attempt(
         InterruptedAttempt: Предыдущая попытка требует восстановления.
         RetryNotDue: Срок повтора ещё не наступил.
         PaymentNotFound: Платёж отсутствует.
+        AttemptMismatch: Номер повтора несовместим с состоянием платежа.
     """
     async with session.begin():
         payment = await session.scalar(
@@ -65,7 +66,9 @@ async def begin_attempt(
             if previous_attempts < payment.processing_attempts:
                 return 0
             if previous_attempts != payment.processing_attempts:
-                raise ValueError("Номер повтора не соответствует состоянию платежа")
+                raise AttemptMismatch(
+                    "Номер повтора не соответствует состоянию платежа"
+                )
             if payment.next_attempt_at > datetime.now(UTC):
                 raise RetryNotDue
         if payment.processing_attempts >= MAX_ATTEMPTS:

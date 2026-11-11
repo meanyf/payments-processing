@@ -13,6 +13,7 @@ from payments_processing.db.session import session_factory
 from payments_processing.messaging import broker as broker_module
 from payments_processing.messaging.broker import broker, payments_queue
 from payments_processing.messaging.schemas import PaymentEvent
+from payments_processing.services.exceptions import AttemptMismatch, PaymentNotFound
 from payments_processing.services.payment_lock import lock_payment
 from payments_processing.services.payments import process_payment
 from payments_processing.services.retries import (
@@ -53,6 +54,9 @@ async def _handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
     except InterruptedAttempt as error:
         started = None
         attempt = error.attempt
+    except (PaymentNotFound, AttemptMismatch) as error:
+        await reject_invalid(message, str(error))
+        return
     except Exception:
         logger.exception("Не удалось начать попытку платежа %s", event.payment_id)
         await message.nack(requeue=True)
@@ -116,6 +120,17 @@ async def publish_invalid(body: bytes, headers: dict, reason: str) -> None:
         raise RuntimeError("RabbitMQ не подтвердил передачу в DLQ")  # noqa: TRY004
 
 
+async def reject_invalid(message: RabbitMessage, reason: str) -> None:
+    """Подтверждает постоянную ошибку только после передачи оригинала в DLQ."""
+    try:
+        await publish_invalid(message.body, message.headers, reason)
+    except Exception:
+        logger.exception("Не удалось передать некорректное сообщение в DLQ")
+        await message.nack(requeue=True)
+        return
+    await message.ack()
+
+
 @broker.subscriber(payments_queue, ack_policy=AckPolicy.MANUAL, decoder=raw_body)
 async def receive_payment(body: bytes, message: RabbitMessage) -> None:
     """Проверяет сообщение и направляет некорректные данные в DLQ.
@@ -130,12 +145,6 @@ async def receive_payment(body: bytes, message: RabbitMessage) -> None:
         if type(attempts) is not int or not 0 <= attempts <= MAX_ATTEMPTS:
             raise ValueError("x-attempts должен быть целым числом от 0 до 3")
     except (ValidationError, ValueError) as error:
-        try:
-            await publish_invalid(body, message.headers, str(error))
-        except Exception:
-            logger.exception("Не удалось передать некорректное сообщение в DLQ")
-            await message.nack(requeue=True)
-            return
-        await message.ack()
+        await reject_invalid(message, str(error))
         return
     await handle_payment(event, message)
