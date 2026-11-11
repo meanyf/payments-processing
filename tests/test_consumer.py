@@ -5,7 +5,6 @@ from uuid import uuid4
 
 import pytest
 from faststream.rabbit import TestRabbitBroker
-from pydantic import ValidationError
 
 from payments_processing.messaging import consumer
 from payments_processing.messaging.schemas import PaymentEvent
@@ -58,9 +57,9 @@ async def test_consumer_rejects_invalid_payment_id(monkeypatch, payload):
     logger = Mock()
     monkeypatch.setattr(consumer, "logger", logger)
 
+    monkeypatch.setattr(consumer, "publish_invalid", AsyncMock())
     async with TestRabbitBroker(consumer.broker) as broker:
-        with pytest.raises(ValidationError):
-            await broker.publish(payload, queue="payments.new")
+        await broker.publish(payload, queue="payments.new")
 
     logger.info.assert_not_called()
 

@@ -9,7 +9,6 @@ __pycache__
 .ruff_cache
 .vscode
 .idea
-tests
 build
 dist
 *.log
