@@ -9,14 +9,16 @@ from aio_pika import DeliveryMode
 from aio_pika.exceptions import DeliveryError
 from faststream.rabbit import RabbitQueue
 from pamqp.commands import Basic
+from sqlalchemy import select
 
 from payments_processing.config import get_settings
+from payments_processing.db.models import AttemptState, Currency, Outbox, Payment
 from payments_processing.messaging import broker as broker_module
 from payments_processing.messaging.broker import (
     connected_broker,
     payments_publisher,
 )
-from payments_processing.services import retries
+from payments_processing.services import outbox, retries
 
 
 @pytest.mark.asyncio
@@ -33,8 +35,7 @@ async def test_consumer_receives_no_more_than_configured_prefetch():
             for _ in range(limit + 1):
                 await broker.publish(b"payment", queue=queue.name)
             pending = [
-                await asyncio.wait_for(received.get(), timeout=5)
-                for _ in range(limit)
+                await asyncio.wait_for(received.get(), timeout=5) for _ in range(limit)
             ]
             with pytest.raises(TimeoutError):
                 await asyncio.wait_for(received.get(), timeout=0.2)
@@ -48,15 +49,29 @@ async def test_consumer_receives_no_more_than_configured_prefetch():
 
 
 @pytest.mark.asyncio
-async def test_exhausted_message_reaches_dlq_through_named_exchange(monkeypatch):
+async def test_exhausted_message_reaches_dlq_through_named_exchange(
+    monkeypatch, session
+):
     """Окончательная ошибка доставляется в DLQ через отдельный обменник."""
     target = RabbitQueue(f"test.dlq.{uuid4().hex}", exclusive=True)
     monkeypatch.setattr(broker_module, "dead_letter_queue", target)
-    monkeypatch.setattr(retries, "dead_letter_queue", target)
+    monkeypatch.setattr(outbox, "dead_letter_queue", target)
     async with connected_broker() as broker:
         queue = await broker.declare_queue(target)
-        payload = {"payment_id": str(uuid4())}
-        await retries.publish_failure(payload, 3)
+        payment = Payment(
+            amount=1,
+            currency=Currency.RUB,
+            description="test",
+            idempotency_key=uuid4().hex,
+            webhook_url="https://example.com",
+            processing_attempts=3,
+            attempt_state=AttemptState.PROCESSING,
+        )
+        async with session.begin():
+            session.add(payment)
+        payload = {"payment_id": str(payment.id)}
+        await retries.exhaust_attempts(session, payload, 3)
+        assert await outbox.publish_pending_events(session) == 1
 
         message = await queue.get(timeout=5)
         assert message is not None
@@ -64,6 +79,9 @@ async def test_exhausted_message_reaches_dlq_through_named_exchange(monkeypatch)
             assert message.exchange == "payments.dlx"
             assert json.loads(message.body) == payload
             assert message.headers["x-attempts"] == 3
+            assert message.delivery_mode == DeliveryMode.PERSISTENT
+        saved = (await session.scalars(select(Outbox))).one()
+        assert saved.published_at is not None
 
 
 @pytest.mark.asyncio
