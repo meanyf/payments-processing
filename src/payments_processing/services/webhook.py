@@ -6,7 +6,7 @@ import httpx
 from sqlalchemy import func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from payments_processing.db.models import Payment
+from payments_processing.db.models import AttemptState, Payment
 
 
 async def send_webhook(client: httpx.AsyncClient, payment: Payment) -> None:
@@ -40,5 +40,9 @@ async def mark_webhook_delivered(session: AsyncSession, payment_id: UUID) -> Non
         await session.execute(
             update(Payment)
             .where(Payment.id == payment_id)
-            .values(webhook_delivered_at=func.now())
+            .values(
+                webhook_delivered_at=func.now(),
+                attempt_state=AttemptState.DELIVERED,
+                next_attempt_at=None,
+            )
         )

@@ -78,9 +78,21 @@ async def test_scheduled_retry_survives_broker_failure(
     """Повтор ждёт срока и сохраняется при сбое RabbitMQ вместе со счётчиком."""
     from datetime import UTC, datetime, timedelta
 
+    from payments_processing.db.models import AttemptState, Currency, Payment
     from payments_processing.services.retries import schedule_retry
 
-    payload = {"payment_id": str(uuid4())}
+    payment = Payment(
+        amount=1,
+        currency=Currency.RUB,
+        description="test",
+        idempotency_key=str(uuid4()),
+        webhook_url="https://example.com",
+        processing_attempts=attempt,
+        attempt_state=AttemptState.PROCESSING,
+    )
+    async with session.begin():
+        session.add(payment)
+    payload = {"payment_id": str(payment.id)}
     before = datetime.now(UTC)
     await schedule_retry(session, payload, attempt)
     event = await session.scalar(select(Outbox))

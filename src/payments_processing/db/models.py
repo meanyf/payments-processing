@@ -29,6 +29,15 @@ class PaymentStatus(StrEnum):
     FAILED = "failed"
 
 
+class AttemptState(StrEnum):
+    """Состояния попытки обработки платежа и доставки webhook."""
+
+    READY = "ready"
+    PROCESSING = "processing"
+    WAITING_RETRY = "waiting_retry"
+    DELIVERED = "delivered"
+
+
 class Payment(Base):
     """Платёж и результат его обработки."""
 
@@ -59,6 +68,18 @@ class Payment(Base):
     webhook_delivered_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
     )
+    attempt_state: Mapped[AttemptState] = mapped_column(
+        Enum(
+            AttemptState,
+            name="attempt_state",
+            native_enum=False,
+            validate_strings=True,
+            values_callable=lambda enum: [item.value for item in enum],
+        ),
+        default=AttemptState.READY,
+        server_default=AttemptState.READY.value,
+    )
+    next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_attempts: Mapped[int] = mapped_column(default=0, server_default="0")
 
 

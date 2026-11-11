@@ -16,6 +16,7 @@ from payments_processing.messaging.schemas import PaymentEvent
 from payments_processing.services.payment_lock import lock_payment
 from payments_processing.services.payments import process_payment
 from payments_processing.services.retries import (
+    InterruptedAttempt,
     begin_attempt,
     publish_failure,
 )
@@ -46,16 +47,24 @@ async def _handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
     """
     logger.info("Получено сообщение о платеже %s", event.payment_id)
     previous_attempts = int(message.headers.get("x-attempts", 0))
-    attempt = min(previous_attempts + 1, MAX_ATTEMPTS)
     try:
         async with session_factory() as session:
             started = await begin_attempt(session, event.payment_id, previous_attempts)
+    except InterruptedAttempt as error:
+        started = None
+        attempt = error.attempt
+    except Exception:
+        logger.exception("Не удалось начать попытку платежа %s", event.payment_id)
+        await message.nack(requeue=True)
+        return
+    else:
+        attempt = MAX_ATTEMPTS if started is None else started
+    try:
+        async with session_factory() as session:
             if started == 0:
                 await message.ack()
                 return
-            if started is None:
-                attempt = MAX_ATTEMPTS
-            else:
+            if started is not None:
                 attempt = started
                 payment = await process_payment(session, event.payment_id)
         if started is not None:

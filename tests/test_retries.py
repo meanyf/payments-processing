@@ -26,11 +26,23 @@ async def test_attempt_survives_processing_rollback_and_stops_at_three(session):
     payment_id = payment.id
 
     for expected in range(1, 4):
-        assert await retries.begin_attempt(session, payment_id) == expected
+        assert (
+            await retries.begin_attempt(session, payment_id, expected - 1) == expected
+        )
         assert not session.in_transaction()
         await session.rollback()
+        if expected < 3:
+            await retries.schedule_retry(
+                session, {"payment_id": str(payment_id)}, expected
+            )
+            from datetime import UTC, datetime, timedelta
 
-    assert await retries.begin_attempt(session, payment_id) is None
+            async with session.begin():
+                payment.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+
+    with pytest.raises(retries.InterruptedAttempt) as error:
+        await retries.begin_attempt(session, payment_id)
+    assert error.value.attempt == 3
 
 
 @pytest.mark.asyncio
@@ -47,7 +59,8 @@ async def test_attempt_accounts_for_db_failures_in_message_header(session):
         session.add(payment)
 
     assert await retries.begin_attempt(session, payment.id, previous_attempts=2) == 3
-    assert await retries.begin_attempt(session, payment.id) is None
+    with pytest.raises(retries.InterruptedAttempt):
+        await retries.begin_attempt(session, payment.id)
 
 
 @pytest.mark.asyncio
@@ -143,3 +156,41 @@ async def test_failure_schedules_retry_without_contacting_broker(monkeypatch, at
     await retries.publish_failure(payload, attempt)
     schedule.assert_awaited_once_with(context.__aenter__.return_value, payload, attempt)
     publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_attempt_recovers_without_consuming_retry(session):
+    """Прерывание требует отложенного повтора, старый дубль не начинает попытку."""
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import select
+
+    from payments_processing.db.models import Outbox
+
+    payment = Payment(
+        amount=Decimal(1),
+        currency=Currency.RUB,
+        description="test",
+        idempotency_key=str(uuid4()),
+        webhook_url="https://example.com",
+    )
+    async with session.begin():
+        session.add(payment)
+    payment_id = payment.id
+    assert await retries.begin_attempt(session, payment_id) == 1
+    with pytest.raises(retries.InterruptedAttempt) as error:
+        await retries.begin_attempt(session, payment_id)
+    assert error.value.attempt == 1
+    payload = {"payment_id": str(payment_id)}
+    await retries.schedule_retry(session, payload, 1)
+    await retries.schedule_retry(session, payload, 1)
+    assert await retries.begin_attempt(session, payment_id) == 0
+    with pytest.raises(retries.RetryNotDue):
+        await retries.begin_attempt(session, payment_id, 1)
+    async with session.begin():
+        rows = list((await session.scalars(select(Outbox))).all())
+        assert len(rows) == 1
+        await session.refresh(payment)
+        assert payment.processing_attempts == 1
+        payment.next_attempt_at = datetime.now(UTC) - timedelta(seconds=1)
+    assert await retries.begin_attempt(session, payment_id, 1) == 2
