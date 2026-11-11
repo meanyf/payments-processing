@@ -11,6 +11,12 @@ from payments_processing.messaging import consumer
 from payments_processing.messaging.schemas import PaymentEvent
 
 
+@pytest.fixture(autouse=True)
+def mock_delivery_marker(monkeypatch):
+    """Изолирует запись доставки в модульных тестах обработчика."""
+    monkeypatch.setattr(consumer, "mark_webhook_delivered", AsyncMock())
+
+
 @pytest.mark.asyncio
 async def test_consumer_parses_payment_id(monkeypatch):
     """Сообщение из payments.new поступает обработчику с UUID платежа."""
@@ -40,7 +46,7 @@ async def test_consumer_parses_payment_id(monkeypatch):
 
     logger.info.assert_called_once_with("Получено сообщение о платеже %s", payment_id)
     process.assert_awaited_once_with(session, payment_id)
-    context.__aexit__.assert_awaited_once()
+    assert context.__aexit__.await_count == 2
     webhook.assert_awaited_once()
     http_context.__aexit__.assert_awaited_once()
 
@@ -134,3 +140,22 @@ async def test_transfer_error_requeues_original(monkeypatch):
 
     message.ack.assert_not_awaited()
     message.nack.assert_awaited_once_with(requeue=True)
+
+
+@pytest.mark.asyncio
+async def test_delivered_duplicate_is_acknowledged_without_work(monkeypatch):
+    """Завершённый дубль подтверждается без обработки, webhook и DLQ."""
+    monkeypatch.setattr(consumer, "session_factory", Mock(return_value=AsyncMock()))
+    monkeypatch.setattr(consumer, "begin_attempt", AsyncMock(return_value=0))
+    process = AsyncMock()
+    webhook = AsyncMock()
+    transfer = AsyncMock()
+    monkeypatch.setattr(consumer, "process_payment", process)
+    monkeypatch.setattr(consumer, "send_webhook", webhook)
+    monkeypatch.setattr(consumer, "publish_failure", transfer)
+    message = AsyncMock(headers={})
+    await consumer.handle_payment(PaymentEvent(payment_id=uuid4()), message)
+    message.ack.assert_awaited_once()
+    process.assert_not_awaited()
+    webhook.assert_not_awaited()
+    transfer.assert_not_awaited()

@@ -81,3 +81,47 @@ async def test_retry_requires_broker_confirmation(monkeypatch):
     monkeypatch.setattr(retries.broker, "publish", AsyncMock(return_value=None))
     with pytest.raises(RuntimeError, match="подтвердил"):
         await retries.publish_failure({"payment_id": str(uuid4())}, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("attempts", [1, 3])
+async def test_delivered_webhook_does_not_consume_attempt(session, attempts):
+    """Дубли завершённого уведомления не расходуют попытки даже после лимита."""
+    from datetime import UTC, datetime
+
+    payment = Payment(
+        amount=Decimal("100.00"),
+        currency=Currency.RUB,
+        description="Заказ",
+        idempotency_key=str(uuid4()),
+        webhook_url="https://example.com/webhook",
+        processing_attempts=attempts,
+        webhook_delivered_at=datetime.now(UTC),
+    )
+    async with session.begin():
+        session.add(payment)
+    assert await retries.begin_attempt(session, payment.id, 3) == 0
+    await session.refresh(payment)
+    assert payment.processing_attempts == attempts
+
+
+@pytest.mark.asyncio
+async def test_delivery_marker_is_persisted_before_duplicate(session):
+    """Сохранённая доставка предотвращает новую попытку в БД."""
+    from payments_processing.services.webhook import mark_webhook_delivered
+
+    payment = Payment(
+        amount=Decimal("100.00"),
+        currency=Currency.RUB,
+        description="Заказ",
+        idempotency_key=str(uuid4()),
+        webhook_url="https://example.com/webhook",
+    )
+    async with session.begin():
+        session.add(payment)
+    assert await retries.begin_attempt(session, payment.id) == 1
+    await mark_webhook_delivered(session, payment.id)
+    assert await retries.begin_attempt(session, payment.id) == 0
+    await session.refresh(payment)
+    assert payment.webhook_delivered_at is not None
+    assert payment.processing_attempts == 1

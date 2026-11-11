@@ -28,7 +28,7 @@ async def begin_attempt(
         previous_attempts: Число попыток из заголовка сообщения на случай сбоев БД.
 
     Returns:
-        Номер начатой попытки или None, если лимит уже исчерпан.
+        Номер попытки, 0 для доставленного уведомления или None при исчерпании лимита.
 
     Raises:
         PaymentNotFound: Если платёж отсутствует в БД.
@@ -39,6 +39,7 @@ async def begin_attempt(
             .where(
                 Payment.id == payment_id,
                 Payment.processing_attempts < MAX_ATTEMPTS,
+                Payment.webhook_delivered_at.is_(None),
                 previous_attempts < MAX_ATTEMPTS,
             )
             .values(
@@ -52,10 +53,14 @@ async def begin_attempt(
         )
         if attempt is None:
             exists = await session.scalar(
-                select(Payment.id).where(Payment.id == payment_id)
+                select(Payment)
+                .where(Payment.id == payment_id)
+                .execution_options(populate_existing=True)
             )
             if exists is None:
                 raise PaymentNotFound(str(payment_id))
+            if exists.webhook_delivered_at is not None:
+                return 0
     return attempt
 
 

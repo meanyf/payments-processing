@@ -1,6 +1,10 @@
 """Отправка клиенту результата платежа по HTTP."""
 
+from uuid import UUID
+
 import httpx
+from sqlalchemy import func, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from payments_processing.db.models import Payment
 
@@ -23,3 +27,18 @@ async def send_webhook(client: httpx.AsyncClient, payment: Payment) -> None:
         follow_redirects=False,
     )
     response.raise_for_status()
+
+
+async def mark_webhook_delivered(session: AsyncSession, payment_id: UUID) -> None:
+    """Сохраняет факт доставки уведомления перед подтверждением сообщения.
+
+    Args:
+        session: Сессия БД без активной транзакции.
+        payment_id: Идентификатор уведомлённого платежа.
+    """
+    async with session.begin():
+        await session.execute(
+            update(Payment)
+            .where(Payment.id == payment_id)
+            .values(webhook_delivered_at=func.now())
+        )

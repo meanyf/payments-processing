@@ -15,7 +15,7 @@ from payments_processing.services.retries import (
     begin_attempt,
     publish_failure,
 )
-from payments_processing.services.webhook import send_webhook
+from payments_processing.services.webhook import mark_webhook_delivered, send_webhook
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +34,9 @@ async def handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
     try:
         async with session_factory() as session:
             started = await begin_attempt(session, event.payment_id, previous_attempts)
+            if started == 0:
+                await message.ack()
+                return
             if started is None:
                 attempt = MAX_ATTEMPTS
             else:
@@ -42,6 +45,8 @@ async def handle_payment(event: PaymentEvent, message: RabbitMessage) -> None:
         if started is not None:
             async with httpx.AsyncClient() as client:
                 await send_webhook(client, payment)
+            async with session_factory() as session:
+                await mark_webhook_delivered(session, event.payment_id)
     except Exception:
         logger.exception(
             "Ошибка обработки платежа %s, попытка %s", event.payment_id, attempt
